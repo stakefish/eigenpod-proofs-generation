@@ -19,6 +19,7 @@ import (
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/multicall"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/onchain"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/utils"
+	v1 "github.com/attestantio/go-eth2-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -104,9 +105,20 @@ type ValidatorWithIndex = struct {
 	Index     uint64
 }
 
+type SfValidatorWithIndex = struct {
+	Validator *v1.Validator
+	Index     uint64
+}
+
 type ValidatorWithOnchainInfo = struct {
 	Info      onchain.IEigenPodValidatorInfo
 	Validator *phase0.Validator
+	Index     uint64
+}
+
+type SfValidatorWithOnchainInfo = struct {
+	Info      onchain.IEigenPodValidatorInfo
+	Validator *v1.Validator
 	Index     uint64
 }
 
@@ -219,6 +231,70 @@ func GetCheckpointTimestampAndBeaconState(
 	tracing.OnEndSection()
 
 	return checkpointTimestamp, beaconState, nil
+}
+
+// Fetch and return the current checkpoint timestamp for the pod
+// If the checkpoint exists (timestamp != 0), also return the beacon state for the checkpoint
+// If the checkpoint does not exist (timestamp == 0), return the head beacon state (i.e. the state we would use "if we start a checkpoint now")
+func SfGetCheckpointTimestampAndBeaconState(
+	ctx context.Context,
+	eigenpodAddress string,
+	validatorIndicesForEigenpod []uint64,
+	eth *ethclient.Client,
+	beaconClient BeaconClient,
+) (uint64, []*v1.Validator, error) {
+	tracing := GetContextTracingCallbacks(ctx)
+
+	tracing.OnStartSection("GetCurrentCheckpoint", map[string]string{})
+	checkpointTimestamp, err := GetCurrentCheckpoint(eigenpodAddress, eth)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to fetch current checkpoint: %w", err)
+	}
+	tracing.OnEndSection()
+
+	// stateId to look up beacon state. "head" by default (if we do not have a checkpoint)
+	beaconStateId := "head"
+
+	// If we have a checkpoint, get the state id for the checkpoint's block root
+	if checkpointTimestamp != 0 {
+		// Fetch the checkpoint's block root
+		tracing.OnStartSection("GetCurrentCheckpointBlockRoot", map[string]string{})
+		blockRoot, err := GetCurrentCheckpointBlockRoot(eigenpodAddress, eth)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint: %w", err)
+		}
+		if blockRoot == nil {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint - nil blockRoot")
+		}
+		// Block root should be nonzero because we have an active checkpoint
+		rootBytes := *blockRoot
+		if AllZero(rootBytes[:]) {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint - empty blockRoot")
+		}
+		tracing.OnEndSection()
+
+		headerBlock := "0x" + hex.EncodeToString((*blockRoot)[:])
+		tracing.OnStartSection("GetBeaconHeader", map[string]string{})
+		header, err := beaconClient.GetBeaconHeader(ctx, headerBlock)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to fetch beacon header (%s): %w", headerBlock, err)
+		}
+		tracing.OnEndSection()
+
+		beaconStateId = strconv.FormatUint(uint64(header.Header.Message.Slot), 10)
+	}
+
+	tracing.OnStartSection("GetBeaconState", map[string]string{})
+	validators, err := beaconClient.GetValidators(ctx, validatorIndicesForEigenpod, beaconStateId)
+	unpackedValidators := utils.Map(validatorIndicesForEigenpod, func(index uint64, _ uint64) *v1.Validator {
+		return validators[phase0.ValidatorIndex(index)]
+	})
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to fetch beacon state: %w", err)
+	}
+	tracing.OnEndSection()
+
+	return checkpointTimestamp, unpackedValidators, nil
 }
 
 func SortByStatus(validators map[string]Validator) ([]Validator, []Validator, []Validator, []Validator) {
@@ -365,6 +441,38 @@ func FetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Cl
 			Info:      *info,
 			Validator: allValidators[i].Validator,
 			Index:     allValidators[i].Index,
+		}
+	}), nil
+}
+
+func SfFetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Client, eigenpodAddress string, allValidators []*v1.Validator) ([]SfValidatorWithOnchainInfo, error) {
+	allMulticalls, err := FetchMultipleOnchainValidatorInfoMulticalls(eigenpodAddress, utils.Map(allValidators, func(validator *v1.Validator, i uint64) *phase0.Validator { return validator.Validator }))
+	if err != nil {
+		return nil, fmt.Errorf("failed to form multicalls: %s", err.Error())
+	}
+
+	// make the multicall requests
+	multicallInstance, err := multicall.NewMulticallClient(ctx, client, &multicall.TMulticallClientOptions{
+		MaxBatchSizeBytes: 4096,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to contact multicall: %s", err.Error())
+	}
+
+	results, err := multicall.DoMultiCallMany(*multicallInstance, allMulticalls...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch validator info: %s", err.Error())
+	}
+
+	if results == nil {
+		return nil, errors.New("no results returned fetching validator info")
+	}
+
+	return utils.Map(*results, func(info *onchain.IEigenPodValidatorInfo, i uint64) SfValidatorWithOnchainInfo {
+		return SfValidatorWithOnchainInfo{
+			Info:      *info,
+			Validator: allValidators[i],
+			Index:     uint64(allValidators[i].Index),
 		}
 	}), nil
 }
@@ -590,6 +698,26 @@ func SelectCheckpointableValidators(
 	return checkpointValidators, nil
 }
 
+func SfSelectCheckpointableValidators(
+	client *ethclient.Client,
+	eigenpodAddress string,
+	validators []SfValidatorWithOnchainInfo,
+	lastCheckpoint uint64,
+) ([]SfValidatorWithOnchainInfo, error) {
+	var checkpointValidators = []SfValidatorWithOnchainInfo{}
+	for i := 0; i < len(validators); i++ {
+		validator := validators[i]
+
+		notCheckpointed := (validator.Info.LastCheckpointedAt != lastCheckpoint) || (validator.Info.LastCheckpointedAt == 0)
+		isActive := validator.Info.Status == ValidatorStatusActive
+
+		if notCheckpointed && isActive {
+			checkpointValidators = append(checkpointValidators, validator)
+		}
+	}
+	return checkpointValidators, nil
+}
+
 // (https://github.com/Layr-Labs/eigenlayer-contracts/blob/d148952a2942a97a218a2ab70f9b9f1792796081/src/contracts/libraries/BeaconChainProofs.sol#L64)
 const FAR_FUTURE_EPOCH = math.MaxUint64
 
@@ -635,6 +763,21 @@ func SelectActiveValidators(
 	validators []ValidatorWithOnchainInfo,
 ) ([]ValidatorWithOnchainInfo, error) {
 	var activeValidators = []ValidatorWithOnchainInfo{}
+	for i := 0; i < len(validators); i++ {
+		validator := validators[i]
+		if validator.Info.Status == ValidatorStatusActive {
+			activeValidators = append(activeValidators, validator)
+		}
+	}
+	return activeValidators, nil
+}
+
+func SfSelectActiveValidators(
+	client *ethclient.Client,
+	eigenpodAddress string,
+	validators []SfValidatorWithOnchainInfo,
+) ([]SfValidatorWithOnchainInfo, error) {
+	var activeValidators = []SfValidatorWithOnchainInfo{}
 	for i := 0; i < len(validators); i++ {
 		validator := validators[i]
 		if validator.Info.Status == ValidatorStatusActive {

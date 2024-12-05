@@ -25,6 +25,7 @@ type BeaconClient interface {
 	GetBeaconHeader(ctx context.Context, blockId string) (*v1.BeaconBlockHeader, error)
 	GetBeaconState(ctx context.Context, stateId string) (*spec.VersionedBeaconState, error)
 	GetValidator(ctx context.Context, index uint64) (*v1.Validator, error)
+	GetValidators(ctx context.Context, indices []uint64, stateId string) (map[phase0.ValidatorIndex]*v1.Validator, error)
 	GetGenesisForkVersion(ctx context.Context) (*phase0.Version, error)
 }
 
@@ -82,10 +83,22 @@ func (b *beaconClient) GetGenesisForkVersion(ctx context.Context) (*phase0.Versi
 }
 
 func (b *beaconClient) GetValidator(ctx context.Context, index uint64) (*v1.Validator, error) {
+	validators, err := b.GetValidators(ctx, []uint64{index}, "head")
+	if err != nil {
+		return nil, err
+	}
+	return validators[phase0.ValidatorIndex(index)], nil
+}
+
+func (b *beaconClient) GetValidators(ctx context.Context, indices []uint64, stateId string) (map[phase0.ValidatorIndex]*v1.Validator, error) {
 	if provider, ok := b.eth2client.(eth2client.ValidatorsProvider); ok {
+		var optsIndices []phase0.ValidatorIndex
+		for _, index := range indices {
+			optsIndices = append(optsIndices, phase0.ValidatorIndex(index))
+		}
 		opts := api.ValidatorsOpts{
-			State:   "head",
-			Indices: []phase0.ValidatorIndex{phase0.ValidatorIndex(index)},
+			State:   stateId,
+			Indices: optsIndices,
 		}
 		singleValidorInfoResponse, err := provider.Validators(ctx, &opts)
 		if err != nil {
@@ -99,7 +112,7 @@ func (b *beaconClient) GetValidator(ctx context.Context, index uint64) (*v1.Vali
 		if b.verbose {
 			log.Info().Msg("finished download")
 		}
-		return singleValidorInfoResponse.Data[phase0.ValidatorIndex(index)], nil
+		return singleValidorInfoResponse.Data, nil
 	}
 
 	return nil, ErrBeaconClientNotSupported

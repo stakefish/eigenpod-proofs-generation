@@ -23,6 +23,7 @@ type TStatusArgs struct {
 }
 
 func StatusCommand(args TStatusArgs) error {
+	startTime := time.Now()
 	ctx := context.Background()
 	if args.DisableColor {
 		color.NoColor = true
@@ -40,6 +41,8 @@ func StatusCommand(args TStatusArgs) error {
 		core.PanicOnError("failed to get status", err)
 		statusStr := string(bytes)
 		fmt.Println(statusStr)
+		endTime := time.Now()
+		fmt.Printf("Time taken: %v\n", endTime.Sub(startTime))
 		return nil
 	} else {
 		bold := color.New(color.Bold, color.FgBlue)
