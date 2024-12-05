@@ -108,7 +108,7 @@ func sfSumRestakedBalancesGwei(activeValidators []SfValidatorWithOnchainInfo) *b
 	return sumGwei
 }
 
-func GetStatus(ctx context.Context, eigenpodAddress string, eth *ethclient.Client, beaconClient BeaconClient) EigenpodStatus {
+func GetStatus_ORIGINAL(ctx context.Context, eigenpodAddress string, eth *ethclient.Client, beaconClient BeaconClient) EigenpodStatus {
 	validators := map[string]Validator{}
 	var activeCheckpoint *Checkpoint = nil
 
@@ -250,7 +250,7 @@ func GetStatus(ctx context.Context, eigenpodAddress string, eth *ethclient.Clien
 		MustForceCheckpoint:            mustForceCheckpoint,
 	}
 }
-func GetStatus_SF(ctx context.Context, eigenpodAddress string, eth *ethclient.Client, beaconClient BeaconClient) EigenpodStatus {
+func GetStatus(ctx context.Context, eigenpodAddress string, eth *ethclient.Client, beaconClient BeaconClient) EigenpodStatus {
 	validators := map[string]Validator{}
 	var activeCheckpoint *Checkpoint = nil
 
