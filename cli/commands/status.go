@@ -34,7 +34,7 @@ func StatusCommand(args TStatusArgs) error {
 	eth, beaconClient, _, err := core.GetClients(ctx, args.Node, args.BeaconNode, isVerbose)
 	core.PanicOnError("failed to load ethereum clients", err)
 
-	status := core.GetStatus(ctx, args.EigenpodAddress, eth, beaconClient)
+	status := core.GetStatus(ctx, args.EigenpodAddress, []uint64{}, eth, beaconClient)
 
 	if args.UseJSON {
 		bytes, err := json.MarshalIndent(status, "", "      ")

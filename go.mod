@@ -4,6 +4,8 @@ go 1.21
 
 toolchain go1.21.7
 
+// replace github.com/Layr-Labs/eigenpod-proofs-generation => .
+
 require (
 	github.com/attestantio/go-eth2-client v0.19.9
 	github.com/ethereum/go-ethereum v1.13.14
