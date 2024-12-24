@@ -306,6 +306,7 @@ func GetStatus(ctx context.Context, eigenpodAddress string, validatorIndices []u
 	}
 	fmt.Printf("Time taken to process validators: %v\n", time.Since(startTime))
 
+	startTime = time.Now()
 	eigenpodManagerContractAddress, err := eigenPod.EigenPodManager(nil)
 	PanicOnError("failed to get manager address", err)
 
@@ -317,7 +318,9 @@ func GetStatus(ctx context.Context, eigenpodAddress string, validatorIndices []u
 
 	proofSubmitter, err := eigenPod.ProofSubmitter(nil)
 	PanicOnError("failed to get eigenpod proof submitter", err)
+	fmt.Printf("Time taken to get eigenpod manager and owner info: %v\n", time.Since(startTime))
 
+	startTime = time.Now()
 	currentOwnerShares, err := eigenPodManager.PodOwnerShares(nil, eigenPodOwner)
 	// currentOwnerShares = big.NewInt(0)
 	PanicOnError("failed to load pod owner shares", err)
@@ -326,7 +329,9 @@ func GetStatus(ctx context.Context, eigenpodAddress string, validatorIndices []u
 
 	withdrawableRestakedExecutionLayerGwei, err := eigenPod.WithdrawableRestakedExecutionLayerGwei(nil)
 	PanicOnError("failed to fetch withdrawableRestakedExecutionLayerGwei", err)
+	fmt.Printf("Time taken to get shares and withdrawable balance: %v\n", time.Since(startTime))
 
+	startTime = time.Now()
 	// Estimate the total shares we'll have if we complete an existing checkpoint
 	// (or start a new one and complete that).
 	//
@@ -389,6 +394,7 @@ func GetStatus(ctx context.Context, eigenpodAddress string, validatorIndices []u
 	)
 
 	pendingEth := GweiToEther(WeiToGwei(pendingSharesWei))
+	fmt.Printf("Time taken to calculate final balances: %v\n", time.Since(startTime))
 
 	return EigenpodStatus{
 		Validators:                     validators,
