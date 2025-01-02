@@ -164,7 +164,7 @@ func main() {
 					},
 				},
 				Action: func(_ *cli.Context) error {
-					return commands.CheckpointCommand(commands.TCheckpointCommandArgs{
+					_, err := commands.CheckpointCommand(commands.TCheckpointCommandArgs{
 						DisableColor:        disableColor,
 						NoPrompt:            noPrompt,
 						SimulateTransaction: sender == "" || estimateGas,
@@ -176,6 +176,7 @@ func main() {
 						Verbose:             verbose,
 						Sender:              sender,
 					})
+					return err
 				},
 			},
 			{

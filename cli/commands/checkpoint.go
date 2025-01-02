@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/onchain"
@@ -26,7 +28,7 @@ type TCheckpointCommandArgs struct {
 	Verbose             bool
 }
 
-func CheckpointCommand(args TCheckpointCommandArgs) error {
+func CheckpointCommand(args TCheckpointCommandArgs) (simulatedJson string, err error) {
 	ctx := context.Background()
 
 	if args.DisableColor {
@@ -60,7 +62,7 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 				color.Green("started checkpoint! txn: %s", txn.Hash().Hex())
 			} else {
 				gas := txn.Gas()
-				printAsJSON([]Transaction{
+				txns := []Transaction{
 					{
 						Type:     "checkpoint_start",
 						To:       txn.To().Hex(),
@@ -72,9 +74,11 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 							return nil
 						}(),
 					},
-				})
-
-				return nil
+				}
+				out, err := json.MarshalIndent(txns, " ", "   ")
+				core.PanicOnError("failed to serialize", err)
+				fmt.Println(string(out))
+				return string(out), nil
 			}
 
 			newCheckpoint, err := eigenpod.CurrentCheckpointTimestamp(nil)
@@ -102,7 +106,9 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 				Type:     "checkpoint_proof",
 			}
 		})
-		printAsJSON(printableTxns)
+		out, err := json.MarshalIndent(printableTxns, " ", "   ")
+		core.PanicOnError("failed to serialize", err)
+		return string(out), nil
 	} else {
 		for i, txn := range txns {
 			color.Green("transaction(%d): %s", i, txn.Hash().Hex())
@@ -110,5 +116,5 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 	}
 	core.PanicOnError("an error occurred while submitting your checkpoint proofs", err)
 
-	return nil
+	return "", nil
 }
