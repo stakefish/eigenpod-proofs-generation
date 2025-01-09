@@ -7,12 +7,14 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"time"
 
 	eigenpodproofs "github.com/Layr-Labs/eigenpod-proofs-generation"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/onchain"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/utils"
 	v1 "github.com/attestantio/go-eth2-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec"
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -115,6 +117,129 @@ func SubmitValidatorProofChunk(ctx context.Context, ownerAccount *Owner, eigenPo
 	)
 
 	return txn, err
+}
+
+/**
+ * Generates a .ProveValidatorContainers() proof for all eligible validators on the pod. If `validatorIndex` is set, it will only generate  a proof
+ * against that validator, regardless of the validator's state.
+ */
+func SfGenerateValidatorProof(ctx context.Context, eigenpodAddress string, sfValidatorIndices []uint64, eth *ethclient.Client, chainId *big.Int, beaconClient BeaconClient, validatorIndex *big.Int, verbose bool) (*eigenpodproofs.VerifyValidatorFieldsCallParams, uint64, error) {
+	start := time.Now()
+	latestBlock, err := eth.BlockByNumber(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to load latest block: %w", err)
+	}
+	fmt.Printf("Loading latest block took: %v\n", time.Since(start))
+
+	start = time.Now()
+	eigenPod, err := onchain.NewEigenPod(common.HexToAddress(eigenpodAddress), eth)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to reach eigenpod: %w", err)
+	}
+	fmt.Printf("Creating EigenPod instance took: %v\n", time.Since(start))
+
+	start = time.Now()
+	expectedBlockRoot, err := eigenPod.GetParentBlockRoot(nil, latestBlock.Time())
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to load parent block root: %w", err)
+	}
+	fmt.Printf("Getting parent block root took: %v\n", time.Since(start))
+
+	start = time.Now()
+	header, err := beaconClient.GetBeaconHeader(ctx, "0x"+common.Bytes2Hex(expectedBlockRoot[:]))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to fetch beacon header: %w", err)
+	}
+	fmt.Printf("Getting beacon header took: %v\n", time.Since(start))
+
+	start = time.Now()
+	validators, err := beaconClient.GetValidators(ctx, sfValidatorIndices, strconv.FormatUint(uint64(header.Header.Message.Slot), 10))
+	unpackedValidators := utils.Map(sfValidatorIndices, func(index uint64, _ uint64) *v1.Validator {
+		return validators[phase0.ValidatorIndex(index)]
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to fetch beacon validators: %w", err)
+	}
+	fmt.Printf("Getting and unpacking validators took: %v\n", time.Since(start))
+
+	start = time.Now()
+	proofExecutor, err := eigenpodproofs.NewEigenPodProofs(chainId.Uint64(), 300 /* oracleStateCacheExpirySeconds - 5min */)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to initialize provider: %w", err)
+	}
+	fmt.Printf("Creating proof executor took: %v\n", time.Since(start))
+
+	start = time.Now()
+	beaconState, err := beaconClient.GetBeaconState(ctx, strconv.FormatUint(uint64(header.Header.Message.Slot), 10))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to fetch beacon state: %w", err)
+	}
+	fmt.Printf("Getting beacon state took: %v\n", time.Since(start))
+
+	start = time.Now()
+	proofs, err := SfGenerateValidatorProofAtState(ctx, proofExecutor, eigenpodAddress, unpackedValidators, beaconState, eth, chainId, header, latestBlock.Time(), validatorIndex, verbose)
+	fmt.Printf("Generating validator proof took: %v\n", time.Since(start))
+	return proofs, latestBlock.Time(), err
+}
+
+func SfGenerateValidatorProofAtState(ctx context.Context, proofs *eigenpodproofs.EigenPodProofs, eigenpodAddress string, allValidators []*v1.Validator, beaconState *spec.VersionedBeaconState, eth *ethclient.Client, chainId *big.Int, header *v1.BeaconBlockHeader, blockTimestamp uint64, forSpecificValidatorIndex *big.Int, verbose bool) (*eigenpodproofs.VerifyValidatorFieldsCallParams, error) {
+	if len(allValidators) == 0 {
+		return nil, fmt.Errorf("failed to find validators")
+	}
+
+	var awaitingCredentialValidators []SfValidatorWithIndex
+
+	if forSpecificValidatorIndex != nil {
+		// prove a specific validator
+		for _, v := range allValidators {
+			if uint64(v.Index) == forSpecificValidatorIndex.Uint64() {
+				awaitingCredentialValidators = []SfValidatorWithIndex{{Index: uint64(v.Index), Validator: v}}
+				break
+			}
+		}
+		if len(awaitingCredentialValidators) == 0 {
+			return nil, fmt.Errorf("validator at index %d does not exist or does not have withdrawal credentials set to pod %s", forSpecificValidatorIndex.Uint64(), eigenpodAddress)
+		}
+	} else {
+		// default behavior -- load any validators that are inactive / need a credential proof
+		allValidatorsWithInfo, err := SfFetchMultipleOnchainValidatorInfo(ctx, eth, eigenpodAddress, allValidators)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load validator information: %s", err.Error())
+		}
+
+		_awaitingCredentialValidators, err := SfSelectAwaitingCredentialValidators(eth, eigenpodAddress, allValidatorsWithInfo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select awaiting credential validators: %s", err.Error())
+		}
+
+		awaitingCredentialValidators = utils.Map(_awaitingCredentialValidators, func(v SfValidatorWithOnchainInfo, _ uint64) SfValidatorWithIndex {
+			return SfValidatorWithIndex{Index: v.Index, Validator: v.Validator}
+		})
+	}
+
+	if len(awaitingCredentialValidators) == 0 {
+		if verbose {
+			color.Red("You have no inactive validators to verify. Everything up-to-date.")
+		}
+		return nil, nil
+	} else {
+		if verbose {
+			color.Blue("Verifying %d inactive validators", len(awaitingCredentialValidators))
+		}
+	}
+
+	validatorIndices := make([]uint64, len(awaitingCredentialValidators))
+	for i, v := range awaitingCredentialValidators {
+		validatorIndices[i] = v.Index
+	}
+
+	// validator proof
+	validatorProofs, err := proofs.ProveValidatorContainers(header.Header.Message, beaconState, validatorIndices)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prove validators: %w", err)
+	}
+
+	return validatorProofs, nil
 }
 
 /**

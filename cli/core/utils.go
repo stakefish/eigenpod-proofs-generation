@@ -757,6 +757,24 @@ func SelectAwaitingCredentialValidators(
 	return awaitingCredentialValidators, nil
 }
 
+func SfSelectAwaitingCredentialValidators(
+	client *ethclient.Client,
+	eigenpodAddress string,
+	validators []SfValidatorWithOnchainInfo,
+) ([]SfValidatorWithOnchainInfo, error) {
+	var awaitingCredentialValidators = []SfValidatorWithOnchainInfo{}
+	for i := 0; i < len(validators); i++ {
+		validator := validators[i]
+
+		if (validator.Info.Status == ValidatorStatusInactive) &&
+			(validator.Validator.Validator.ExitEpoch == FAR_FUTURE_EPOCH) &&
+			(validator.Validator.Validator.ActivationEpoch != FAR_FUTURE_EPOCH) {
+			awaitingCredentialValidators = append(awaitingCredentialValidators, validator)
+		}
+	}
+	return awaitingCredentialValidators, nil
+}
+
 func SelectActiveValidators(
 	client *ethclient.Client,
 	eigenpodAddress string,
